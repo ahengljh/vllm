@@ -3,10 +3,11 @@
 
 import copy
 import gc
+import os
 import time
 import weakref
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, Tuple
 
 import numpy as np
 import torch
@@ -2440,22 +2441,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return kv_cache_raw_tensors
 
     def _reshape_kv_cache_tensors(
-        self,
-        kv_cache_config: KVCacheConfig,
-        kv_cache_raw_tensors: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """
-        Reshape the KV cache tensors to the desired shape and dtype.
-
-        Args:
-            kv_cache_config: The KV cache config
-            kv_cache_raw_tensors: The KV cache buffer of each layer, with
-            correct size but uninitialized shape.
-        Returns:
-            Dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
-        """
-        kv_caches: dict[str, torch.Tensor] = {}
+            self, kv_cache_config: KVCacheConfig,
+            kv_cache_raw_tensors: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+        kv_cache_tensors: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
@@ -2491,7 +2479,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = kv_cache_raw_tensors[
+                    kv_cache_tensors[layer_name] = kv_cache_raw_tensors[
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
@@ -2515,7 +2503,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         state_tensors.append(tensor)
                         storage_offset += stride[0]
 
-                    kv_caches[layer_name] = state_tensors
+                    kv_cache_tensors[layer_name] = state_tensors
                 else:
                     raise NotImplementedError
 
@@ -2523,7 +2511,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._verify_hybrid_attention_mamba_layout(kv_cache_config,
                                                        kv_cache_raw_tensors)
 
-        return kv_caches
+        # Initialize compression metadata if enabled
+        if hasattr(self, 'kv_cache_compression_enabled'):
+            for layer_name in kv_cache_tensors:
+                # Add compression metadata tensors
+                kv_cache_tensors[f"{layer_name}_compressed"] = torch.zeros(
+                    1, dtype=torch.bool, device=self.device)
+                kv_cache_tensors[f"{layer_name}_importance"] = torch.zeros(
+                    kv_cache_tensors[layer_name].shape[0], 
+                    dtype=torch.float16, 
+                    device=self.device)
+        
+        return kv_cache_tensors
 
     def _verify_hybrid_attention_mamba_layout(
             self, kv_cache_config: KVCacheConfig,
@@ -2597,6 +2596,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        
+        # Enable compression if configured
+        self.kv_cache_compression_enabled = os.environ.get(
+            "VLLM_ENABLE_KV_COMPRESSION", "1") == "1"
+        
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():
@@ -2740,3 +2744,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "the mamba page size")
 
         return attn_page_size
+
+    def _compress_kv_cache_block(self, 
+                                layer_name: str,
+                                block_data: torch.Tensor,
+                                compression_level: int) -> torch.Tensor:
+        """Apply compression to a KV cache block."""
+        if compression_level == 0:
+            return block_data
+        
+        # Simple quantization based on compression level
+        if compression_level == 1:  # INT8
+            scale = block_data.abs().max() / 127.0
+            quantized = (block_data / scale).round().clamp(-128, 127).to(torch.int8)
+            return quantized, scale
+        elif compression_level == 2:  # INT4 (simplified)
+            scale = block_data.abs().max() / 7.0
+            quantized = (block_data / scale).round().clamp(-8, 7).to(torch.int8)
+            return quantized, scale
+        else:
+            return block_data
+
+    def _decompress_kv_cache_block(self,
+                                  layer_name: str,
+                                  compressed_data: Union[torch.Tensor, Tuple[torch.Tensor, float]],
+                                  compression_level: int) -> torch.Tensor:
+        """Decompress a KV cache block."""
+        if compression_level == 0:
+            return compressed_data
+        
+        if isinstance(compressed_data, tuple):
+            quantized, scale = compressed_data
+            return quantized.float() * scale
+        else:
+            return compressed_data

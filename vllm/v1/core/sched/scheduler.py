@@ -160,6 +160,11 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+        
+        # Log compression status if enabled
+        if hasattr(self.kv_cache_manager, 'compression_enabled') and \
+           self.kv_cache_manager.compression_enabled:
+            logger.info("KV cache compression is enabled for scheduler")
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
