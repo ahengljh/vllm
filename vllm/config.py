@@ -1553,6 +1553,29 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    enable_kv_cache_compression: bool = False
+    """Whether to enable cross-page KV cache compression. This reduces memory
+    usage by identifying and merging similar pages through magnitude-direction
+    decomposition."""
+    kv_compression_cosine_threshold: float = 0.85
+    """Cosine similarity threshold for identifying mergeable pages. Pages with
+    directional similarity above this threshold are candidates for merging."""
+    kv_compression_max_merge_ratio: float = 4.0
+    """Maximum compression ratio for merging pages. This limits how many pages
+    can be merged into a single compressed representation."""
+    kv_compression_memory_pressure_threshold: float = 0.8
+    """Memory pressure threshold for triggering aggressive compression. When
+    memory usage exceeds this threshold, compression becomes more aggressive."""
+    kv_compression_temporal_window: int = 100
+    """Temporal window for identifying page neighbors. Only pages within this
+    window are considered for similarity analysis for efficiency."""
+    kv_compression_outlier_threshold: float = 0.3
+    """Threshold for identifying outlier pages that should not be compressed.
+    Pages with average similarity below this threshold are preserved."""
+    kv_compression_importance_threshold: float = 0.9
+    """Importance threshold for protecting critical pages from compression.
+    Pages with importance scores above this threshold are preserved unless
+    under high memory pressure."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -1574,6 +1597,13 @@ class CacheConfig:
         """
         factors: list[Any] = []
         factors.append(self.cache_dtype)
+        factors.append(self.enable_kv_cache_compression)
+        factors.append(self.kv_compression_cosine_threshold)
+        factors.append(self.kv_compression_max_merge_ratio)
+        factors.append(self.kv_compression_memory_pressure_threshold)
+        factors.append(self.kv_compression_temporal_window)
+        factors.append(self.kv_compression_outlier_threshold)
+        factors.append(self.kv_compression_importance_threshold)
         # `cpu_offload_gb` does not use `torch.compile` yet.
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
@@ -1584,6 +1614,7 @@ class CacheConfig:
 
         self._verify_cache_dtype()
         self._verify_prefix_caching()
+        self._verify_kv_compression()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -1630,6 +1661,54 @@ class CacheConfig:
                 "Unknown prefix caching hash algorithm: "
                 f"{self.prefix_caching_hash_algo}. Must be one of "
                 f"{get_args(PrefixCachingHashAlgo)}.")
+
+    def _verify_kv_compression(self) -> None:
+        if not self.enable_kv_cache_compression:
+            return
+
+        # Validate threshold ranges
+        if not (0.0 <= self.kv_compression_cosine_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_cosine_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_cosine_threshold}")
+
+        if self.kv_compression_max_merge_ratio < 1.0:
+            raise ValueError(
+                f"kv_compression_max_merge_ratio must be >= 1.0, "
+                f"got {self.kv_compression_max_merge_ratio}")
+
+        if not (0.0 <= self.kv_compression_memory_pressure_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_memory_pressure_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_memory_pressure_threshold}")
+
+        if self.kv_compression_temporal_window < 1:
+            raise ValueError(
+                f"kv_compression_temporal_window must be >= 1, "
+                f"got {self.kv_compression_temporal_window}")
+
+        if not (0.0 <= self.kv_compression_outlier_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_outlier_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_outlier_threshold}")
+
+        if not (0.0 <= self.kv_compression_importance_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_importance_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_importance_threshold}")
+
+        # Check compatibility with other features
+        if self.enable_kv_cache_compression and self.cpu_offload_gb > 0:
+            logger.warning(
+                "KV cache compression is enabled with CPU offload. "
+                "This may reduce the effectiveness of compression.")
+
+        # Log warning if compression is enabled but prefix caching is disabled
+        if (self.enable_kv_cache_compression and 
+            self.enable_prefix_caching is False):
+            logger.warning(
+                "KV cache compression is enabled but prefix caching is disabled. "
+                "Compression works best with prefix caching enabled.")
 
     def verify_with_parallel_config(
         self,
