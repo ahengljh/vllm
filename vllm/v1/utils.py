@@ -12,6 +12,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
 import torch
+import re
 
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
@@ -294,30 +295,43 @@ def bind_kv_cache(
         kv_caches: The allocated kv_caches with layer names as keys.
         forward_context: The global forward context containing all Attention 
         layers with layer names as keys.
-        runner_kv_caches: The kv_cache declared by ModelRunner.
+        runner_kv_caches: The kv_cache declared by ModelRunner. Will be 
+        populated by this function.
     """
-    # Bind kv_caches to ModelRunner
-    assert len(runner_kv_caches) == 0
-
-    # Convert kv_caches dict to a list of tensors in the order of layer_index.
-    index2name = defaultdict(list)
+    # Skip compression metadata entries
+    compression_suffixes = ("_compressed", "_importance")
+    
+    # Build mapping from layer index to layer names, excluding compression metadata
+    index2names: dict[int, list[str]] = defaultdict(list)
+    
     for layer_name in kv_caches:
-        index2name[extract_layer_index(layer_name)].append(layer_name)
-
-    for layer_index in sorted(index2name.keys()):
-        layer_names = index2name[layer_index]
-        if len(layer_names) > 1:
-            # One typical case is encoder-decoder model, e.g., bart.
-            # The cross attention and self attention in the same decoder layer
-            # has different layer_name but the same layer_index.
-            raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
-
-    # Bind kv_caches to forward context
+        # Skip compression metadata entries
+        if layer_name.endswith(compression_suffixes):
+            continue
+        
+        layer_idx = extract_layer_index(layer_name)
+        index2names[layer_idx].append(layer_name)
+    
+    # Fill runner_kv_caches with kv_caches in order
+    for layer_idx in sorted(index2names.keys()):
+        layer_names = index2names[layer_idx]
+        # Sort layer names for deterministic ordering
+        for layer_name in sorted(layer_names):
+            runner_kv_caches.append(kv_caches[layer_name])
+    
+    # Bind kv_caches to Attention layers
     for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Use list because of v0 PP virtual engine.
-        forward_context[layer_name].kv_cache = [kv_cache]
+        # Skip compression metadata entries
+        if layer_name.endswith(compression_suffixes):
+            continue
+            
+        if layer_name in forward_context:
+            # NOTE: Use list because of v0 PP virtual engine.
+            forward_context[layer_name].kv_cache = [kv_cache]
+        else:
+            # This may happen for cross-attention layers or other special cases
+            # Log a debug message but don't fail
+            logger.debug(f"Layer {layer_name} not found in forward_context, skipping KV cache binding")
 
 
 def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,

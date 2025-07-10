@@ -2512,15 +2512,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                        kv_cache_raw_tensors)
 
         # Initialize compression metadata if enabled
-        if hasattr(self, 'kv_cache_compression_enabled'):
-            for layer_name in kv_cache_tensors:
+        if hasattr(self, 'kv_cache_compression_enabled') and self.kv_cache_compression_enabled:
+            # Collect layer names first to avoid modifying dict during iteration
+            layer_names = list(kv_cache_tensors.keys())
+            for layer_name in layer_names:
                 # Add compression metadata tensors
                 kv_cache_tensors[f"{layer_name}_compressed"] = torch.zeros(
                     1, dtype=torch.bool, device=self.device)
+                # Get the first dimension size for importance scores
+                if isinstance(kv_cache_tensors[layer_name], list):
+                    # For Mamba layers (list of state tensors)
+                    shape_0 = kv_cache_tensors[layer_name][0].shape[0]
+                else:
+                    # For attention layers
+                    shape_0 = kv_cache_tensors[layer_name].shape[0]
                 kv_cache_tensors[f"{layer_name}_importance"] = torch.zeros(
-                    kv_cache_tensors[layer_name].shape[0], 
-                    dtype=torch.float16, 
-                    device=self.device)
+                    shape_0, dtype=torch.float16, device=self.device)
         
         return kv_cache_tensors
 

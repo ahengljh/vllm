@@ -21,11 +21,27 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          PrefixCacheStats, Request, sha256)
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
                                         KVCacheGroupSpec)
+from vllm.v1.request import RequestStatus
+from vllm.distributed.kv_events import KVCacheEvent
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+
+class KVCacheBlocks:
+    """Container for KV cache blocks across different cache groups."""
+    
+    def __init__(self, blocks: tuple[list[KVCacheBlock], ...]):
+        self.blocks = blocks
+    
+    def get_block_ids(self) -> tuple[list[int], ...]:
+        """Get block IDs for all cache groups."""
+        return tuple(
+            [block.block_id for block in block_list]
+            for block_list in self.blocks
+        )
 
 
 # Compression configuration from environment
@@ -291,44 +307,103 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
-    def get_computed_blocks(self, request: Request) -> List[KVCacheBlock]:
+    def get_computed_blocks(self, request: Request) -> Tuple[KVCacheBlocks, int]:
         """Get computed blocks with decompression if needed."""
-        blocks = self.coordinator.get_computed_blocks(request)
+        # Generate block hashes for the request using the proper hashing function
+        block_hashes = []
+        if self.enable_caching and request.prompt_token_ids:
+            from vllm.v1.core.kv_cache_utils import hash_request_tokens
+            block_hashes = hash_request_tokens(
+                self.caching_hash_fn, 
+                self.block_size, 
+                request
+            )
+            
+            # Store block hashes for the request
+            self.req_to_block_hashes[request.request_id] = block_hashes
         
-        # Decompress blocks if needed
-        if self.compression_enabled:
-            for block_list in blocks:
-                for block in block_list:
-                    if hasattr(block, 'compressed') and block.compressed:
-                        # Retrieve from hierarchical storage
-                        data = self.hierarchical_storage.retrieve(block.block_id)
-                        if data is not None:
-                            # In practice, would update actual KV cache data
-                            pass
+        # Find longest cache hit
+        if block_hashes:
+            max_cache_hit_length = len(request.prompt_token_ids)
+            hit_blocks, num_cached_tokens = self.coordinator.find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_cache_hit_length=max_cache_hit_length
+            )
+            # Save the computed blocks for the request
+            self.coordinator.save_new_computed_blocks(request.request_id, hit_blocks)
+            
+            # Return the blocks and number of cached tokens
+            return KVCacheBlocks(hit_blocks), num_cached_tokens
         
-        return blocks
+        # No cached blocks found
+        empty_blocks = self.create_empty_block_list()
+        return empty_blocks, 0
 
     def allocate_slots(
             self,
             request: Request,
-            num_computed_tokens: int,
-            num_future_tokens: int = 1,
-            kv_cache_group_ids: Optional[Set[int]] = None) -> List[KVCacheBlock]:
-        """Enhanced allocate_slots with compression support."""
-        # Original allocation logic
-        num_tokens = num_computed_tokens + num_future_tokens
-        num_blocks = math.ceil(num_tokens / self.block_size)
+            num_tokens: int,
+            num_computed_tokens: int = 0,
+            new_computed_blocks: Optional['KVCacheBlocks'] = None,
+            num_lookahead_tokens: int = 0,
+            num_draft_tokens: int = 0,
+            delay_cache_blocks: bool = False) -> Optional['KVCacheBlocks']:
+        """Enhanced allocate_slots with compression support.
         
-        # Get blocks from coordinator
-        allocated_blocks = self.coordinator.allocate(
-            request, num_computed_tokens, num_future_tokens,
-            kv_cache_group_ids=kv_cache_group_ids)
+        This method handles two calling patterns:
+        1. For running requests: allocate_slots(request, num_new_tokens, num_draft_tokens=..., num_lookahead_tokens=...)
+        2. For waiting requests: allocate_slots(request, total_tokens, num_computed_tokens, new_computed_blocks, ...)
+        
+        Args:
+            request: The request to allocate slots for
+            num_tokens: Number of new tokens to allocate (or total tokens for waiting requests)
+            num_computed_tokens: Number of already computed tokens (0 for running requests)
+            new_computed_blocks: Already computed blocks from cache
+            num_lookahead_tokens: Number of lookahead tokens for speculative decoding
+            num_draft_tokens: Number of draft tokens
+            delay_cache_blocks: Whether to delay caching blocks
+            
+        Returns:
+            KVCacheBlocks containing the allocated blocks, or None if allocation failed
+        """
+        # Determine if this is a running request (simplified call) or waiting request (full call)
+        if new_computed_blocks is None and num_computed_tokens == 0:
+            # This is a running request call - num_tokens is the new tokens to add
+            total_tokens = request.num_computed_tokens + num_tokens + num_lookahead_tokens
+            computed_tokens = request.num_computed_tokens
+            new_computed_blocks_tuple = tuple([] for _ in range(self.num_kv_cache_groups))
+        else:
+            # This is a waiting request call - more complex allocation
+            total_tokens = num_tokens + num_lookahead_tokens
+            computed_tokens = num_computed_tokens
+            new_computed_blocks_tuple = (
+                new_computed_blocks.blocks if new_computed_blocks 
+                else tuple([] for _ in range(self.num_kv_cache_groups))
+            )
+        
+        # Calculate blocks needed
+        num_blocks_needed = self.coordinator.get_num_blocks_to_allocate(
+            request.request_id, total_tokens, new_computed_blocks_tuple
+        )
+        
+        # Check if we have enough free blocks
+        if self.block_pool.get_num_free_blocks() < num_blocks_needed:
+            return None
+        
+        # Allocate new blocks
+        new_blocks = self.coordinator.allocate_new_blocks(
+            request.request_id, total_tokens
+        )
         
         # Apply compression to older blocks if enabled
-        if self.compression_enabled and len(allocated_blocks[0]) > 4:
-            self._compress_old_blocks(request.request_id, allocated_blocks[0])
+        if self.compression_enabled:
+            all_blocks = self.coordinator.get_blocks(request.request_id)
+            for block_list in all_blocks:
+                if len(block_list) > 4:
+                    self._compress_old_blocks(request.request_id, block_list)
         
-        return allocated_blocks
+        # Return the allocated blocks
+        return KVCacheBlocks(new_blocks)
 
     def _compress_old_blocks(self, request_id: str, blocks: List[KVCacheBlock]):
         """Compress older blocks to save memory."""
@@ -377,7 +452,7 @@ class KVCacheManager:
         """Free blocks with compression cleanup."""
         # Clean up compression data
         if self.compression_enabled:
-            blocks = self.coordinator.get_computed_blocks(request)
+            blocks = self.coordinator.get_blocks(request.request_id)
             for block_list in blocks:
                 for block in block_list:
                     # Remove from hierarchical storage
@@ -387,7 +462,7 @@ class KVCacheManager:
         
         # Original free logic
         self.req_to_block_hashes.pop(request.request_id, None)
-        self.coordinator.free(request)
+        self.coordinator.free(request.request_id)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
