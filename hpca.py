@@ -69,17 +69,21 @@ class CompressionTestSuite:
         self.model_name = model_name
         self.results: Dict[str, Any] = {}
         
-        # Test configurations
+        # Test configurations with novel compression methods
         self.test_configs = [
             TestConfig("Baseline (No Compression)", False, 1.0, 1, 8, 256, 512),
-            TestConfig("Light Compression (0.8)", True, 0.8, 2, 8, 256, 512),
-            TestConfig("Medium Compression (0.5)", True, 0.5, 3, 8, 256, 512),
-            TestConfig("Heavy Compression (0.3)", True, 0.3, 4, 8, 256, 512),
-            TestConfig("Extreme Compression (0.1)", True, 0.1, 5, 8, 256, 512),
+            TestConfig("Traditional Magnitude (0.5)", True, 0.5, 2, 8, 256, 512),
+            TestConfig("Temporal Prediction (0.5)", True, 0.5, 3, 8, 256, 512),
+            TestConfig("Semantic-Aware (0.5)", True, 0.5, 3, 8, 256, 512),
+            TestConfig("Advanced Combined (0.5)", True, 0.5, 3, 8, 256, 512),
+            TestConfig("Adaptive Learning (0.3)", True, 0.3, 4, 8, 256, 512),
         ]
         
         # Test prompts of varying complexity
         self.test_prompts = self._generate_test_prompts()
+        
+        # Initialize novel compression methods
+        self._init_compression_methods()
     
     def _generate_test_prompts(self) -> List[str]:
         """Generate diverse test prompts for evaluation."""
@@ -98,10 +102,32 @@ class CompressionTestSuite:
             "In the year 2030, society has undergone remarkable transformations driven by technological advances. Artificial intelligence systems have become deeply integrated into daily life, from smart cities that optimize traffic flow and energy consumption to personalized education platforms that adapt to individual learning styles. The challenge now facing humanity is",
             "The intersection of quantum computing and artificial intelligence represents one of the most promising frontiers in technology. Quantum algorithms could potentially solve complex optimization problems that are currently intractable for classical computers, while AI could help design better quantum error correction codes. This synergy between quantum and classical computing will likely",
             "Climate scientists have developed sophisticated models that combine atmospheric physics, ocean dynamics, and ecosystem interactions to predict future climate scenarios. These models, powered by machine learning techniques, can now process vast amounts of satellite data, weather station measurements, and paleoclimate records. The latest findings suggest that",
+        ]
+    
+    def _init_compression_methods(self):
+        """Initialize novel compression methods for evaluation."""
+        try:
+            from vllm.attention.ops.temporal_predictor import (
+                TemporalImportancePredictor, 
+                SemanticAwareCompressor,
+                AdvancedKVCompressor
+            )
             
-            # Repetitive patterns (good for compression)
-            "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. Now the cat decides to",
-            "Data science involves collecting data, cleaning data, analyzing data, and visualizing data. Data science involves collecting data, cleaning data, analyzing data, and visualizing data. The most important step in data science is",
+            self.temporal_predictor = TemporalImportancePredictor(embedding_dim=64)
+            self.semantic_compressor = SemanticAwareCompressor(vocab_size=50257)
+            self.advanced_compressor = AdvancedKVCompressor(
+                vocab_size=50257,
+                embedding_dim=64,
+                enable_temporal=True,
+                enable_semantic=True
+            )
+            
+            self.novel_methods_available = True
+            logger.info("Novel compression methods initialized successfully")
+            
+        except ImportError as e:
+            logger.warning(f"Novel compression methods not available: {e}")
+            self.novel_methods_available = False
             
             # Code generation prompts
             "Write a Python function to calculate the fibonacci sequence:",
