@@ -18,7 +18,7 @@ from functools import cached_property
 from importlib.util import find_spec
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args, get_origin)
+                    Protocol, TypeVar, Union, cast, get_args)
 
 import regex as re
 import torch
@@ -93,14 +93,14 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription"]
 
-_ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft", "transcription"]
+_ResolvedTask = Literal["generate", "embed", "classify", "reward", "draft",
+                        "transcription"]
 
 RunnerType = Literal["generate", "pooling", "draft", "transcription"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
-    "pooling": ["embed", "classify", "score", "reward"],
+    "pooling": ["embed", "classify", "reward"],
     "draft": ["draft"],
     "transcription": ["transcription"],
 }
@@ -193,28 +193,10 @@ def config(cls: ConfigT) -> ConfigT:
     (i.e. `ConfigT(**json.loads(cli_arg))`). However, if a particular `ConfigT`
     requires custom construction from CLI (i.e. `CompilationConfig`), it can
     have a `from_cli` method, which will be called instead.
+
+    Config validation is performed by the tools/validate_config.py
+    script, which is invoked during the pre-commit checks.
     """
-    if not is_dataclass(cls):
-        raise TypeError("The decorated class must be a dataclass.")
-    attr_docs = get_attr_docs(cls)
-    for f in fields(cls):
-        if f.init and f.default is MISSING and f.default_factory is MISSING:
-            raise ValueError(
-                f"Field '{f.name}' in {cls.__name__} must have a default value."
-            )
-
-        if f.name not in attr_docs:
-            raise ValueError(
-                f"Field '{f.name}' in {cls.__name__} must have a docstring.")
-
-        if get_origin(f.type) is Union:
-            args = get_args(f.type)
-            literal_args = [arg for arg in args if get_origin(arg) is Literal]
-            if len(literal_args) > 1:
-                raise ValueError(
-                    f"Field '{f.name}' in {cls.__name__} must use a single "
-                    "Literal type. Please use 'Literal[Literal1, Literal2]' "
-                    "instead of 'Union[Literal1, Literal2]'.")
     return cls
 
 
@@ -364,6 +346,13 @@ class ModelConfig:
     limit_mm_per_prompt: dict[str, int] = field(default_factory=dict)
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
+    interleave_mm_strings: bool = False
+    """Enable fully interleaved support for multimodal prompts, while using 
+    --chat-template-content-format=string. Defaults to False."""
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
     config_format: Union[str, ConfigFormat] = ConfigFormat.AUTO.value
@@ -480,6 +469,9 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        # Keep set served_model_name before maybe_model_redirect(self.model)
+        self.served_model_name = get_served_model_name(self.model,
+                                                       self.served_model_name)
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
@@ -623,8 +615,6 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-        self.served_model_name = get_served_model_name(self.model,
-                                                       self.served_model_name)
         self.multimodal_config = self._init_multimodal_config()
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -673,7 +663,7 @@ class ModelConfig:
         return self._architecture
 
     @property
-    def model_info(self) -> dict[str, Any]:
+    def model_info(self):
         return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
@@ -696,8 +686,11 @@ class ModelConfig:
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                s3_model.pull_files(model,
+                                    ignore_pattern=[
+                                        "*.pt", "*.safetensors", "*.bin",
+                                        "*.tensors"
+                                    ])
                 self.tokenizer = s3_model.dir
                 return
 
@@ -705,16 +698,19 @@ class ModelConfig:
         if is_s3(tokenizer):
             s3_tokenizer = S3Model()
             s3_tokenizer.pull_files(
-                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                model,
+                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
+                media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 disable_mm_preprocessor_cache=self.
-                disable_mm_preprocessor_cache)
+                disable_mm_preprocessor_cache,
+                interleave_mm_strings=self.interleave_mm_strings)
 
         if self.limit_mm_per_prompt:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
@@ -724,6 +720,9 @@ class ModelConfig:
                              "multimodal models.")
         if self.disable_mm_preprocessor_cache:
             raise ValueError("`disable_mm_preprocessor_cache` is only "
+                             "supported for multimodal models.")
+        if self.interleave_mm_strings:
+            raise ValueError("`interleave_mm_strings` is only "
                              "supported for multimodal models.")
 
         return None
@@ -790,7 +789,7 @@ class ModelConfig:
         if get_pooling_config(model_id, self.revision):
             return "embed"
         if self.registry.is_cross_encoder_model(architectures):
-            return "score"
+            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
@@ -854,14 +853,24 @@ class ModelConfig:
                     "This model supports multiple tasks: %s. "
                     "Defaulting to '%s'.", supported_tasks, selected_task)
         else:
-            # Aliases
-            if task_option == "embedding":
-                msg = ("The 'embedding' task has been renamed to "
-                       "'embed', please use the new name. The old name "
-                       "will be removed in v1.0.")
-                warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            if task_option == "score":
+                if not runner_support["pooling"]:
+                    msg = (f"This model does not support the '{task_option}' "
+                           f"task. Supported tasks: {supported_tasks}")
+                    raise ValueError(msg)
+                if self.registry.is_cross_encoder_model(architectures):
+                    task_option = "classify"
+                else:
+                    task_option = "embed"
+            else:
+                # Aliases
+                if task_option == "embedding":
+                    msg = ("The 'embedding' task has been renamed to "
+                           "'embed', please use the new name. The old name "
+                           "will be removed in v1.0.")
+                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = "embed"
+                    task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (
@@ -982,7 +991,7 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.45.3) with 8-bit models does not
+        The current version of bitsandbytes (0.46.1) with 8-bit models does not
         yet support CUDA graph.
         # TODO Remove this when bitsandbytes supports.
         """
@@ -1423,7 +1432,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.registry.is_cross_encoder_model(self.architectures)
+        return self.task == "classify"
 
     @property
     def use_mla(self) -> bool:
@@ -1451,11 +1460,24 @@ class ModelConfig:
     def matryoshka_dimensions(self):
         return getattr(self.hf_config, "matryoshka_dimensions", None)
 
+    @property
+    def use_pad_token(self) -> bool:
+        # cross_encoder models defaults to using pad_token.
+        # `llm as reranker` models defaults to not using pad_token.
+        return getattr(self.hf_config, "use_pad_token", True)
+
     def get_and_verify_max_len(self, max_model_len: int):
-        tokenizer_config = try_get_tokenizer_config(
-            self.tokenizer,
-            trust_remote_code=self.trust_remote_code,
-            revision=self.tokenizer_revision)
+        # For pooling models, the tokenizer's `model_max_length` is often a
+        # reliable source for the maximum sequence length. However, for
+        # generative models, this can be incorrect and unduly limit the
+        # context window (e.g., DeepSeek-R1). Therefore, we only consider
+        # tokenizer_config for pooling models.
+        tokenizer_config = None
+        if self.runner_type == "pooling":
+            tokenizer_config = try_get_tokenizer_config(
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.tokenizer_revision)
         max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
@@ -1531,6 +1553,29 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    enable_kv_cache_compression: bool = False
+    """Whether to enable cross-page KV cache compression. This reduces memory
+    usage by identifying and merging similar pages through magnitude-direction
+    decomposition."""
+    kv_compression_cosine_threshold: float = 0.85
+    """Cosine similarity threshold for identifying mergeable pages. Pages with
+    directional similarity above this threshold are candidates for merging."""
+    kv_compression_max_merge_ratio: float = 4.0
+    """Maximum compression ratio for merging pages. This limits how many pages
+    can be merged into a single compressed representation."""
+    kv_compression_memory_pressure_threshold: float = 0.8
+    """Memory pressure threshold for triggering aggressive compression. When
+    memory usage exceeds this threshold, compression becomes more aggressive."""
+    kv_compression_temporal_window: int = 100
+    """Temporal window for identifying page neighbors. Only pages within this
+    window are considered for similarity analysis for efficiency."""
+    kv_compression_outlier_threshold: float = 0.3
+    """Threshold for identifying outlier pages that should not be compressed.
+    Pages with average similarity below this threshold are preserved."""
+    kv_compression_importance_threshold: float = 0.9
+    """Importance threshold for protecting critical pages from compression.
+    Pages with importance scores above this threshold are preserved unless
+    under high memory pressure."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -1552,6 +1597,13 @@ class CacheConfig:
         """
         factors: list[Any] = []
         factors.append(self.cache_dtype)
+        factors.append(self.enable_kv_cache_compression)
+        factors.append(self.kv_compression_cosine_threshold)
+        factors.append(self.kv_compression_max_merge_ratio)
+        factors.append(self.kv_compression_memory_pressure_threshold)
+        factors.append(self.kv_compression_temporal_window)
+        factors.append(self.kv_compression_outlier_threshold)
+        factors.append(self.kv_compression_importance_threshold)
         # `cpu_offload_gb` does not use `torch.compile` yet.
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
@@ -1562,6 +1614,7 @@ class CacheConfig:
 
         self._verify_cache_dtype()
         self._verify_prefix_caching()
+        self._verify_kv_compression()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -1608,6 +1661,54 @@ class CacheConfig:
                 "Unknown prefix caching hash algorithm: "
                 f"{self.prefix_caching_hash_algo}. Must be one of "
                 f"{get_args(PrefixCachingHashAlgo)}.")
+
+    def _verify_kv_compression(self) -> None:
+        if not self.enable_kv_cache_compression:
+            return
+
+        # Validate threshold ranges
+        if not (0.0 <= self.kv_compression_cosine_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_cosine_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_cosine_threshold}")
+
+        if self.kv_compression_max_merge_ratio < 1.0:
+            raise ValueError(
+                f"kv_compression_max_merge_ratio must be >= 1.0, "
+                f"got {self.kv_compression_max_merge_ratio}")
+
+        if not (0.0 <= self.kv_compression_memory_pressure_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_memory_pressure_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_memory_pressure_threshold}")
+
+        if self.kv_compression_temporal_window < 1:
+            raise ValueError(
+                f"kv_compression_temporal_window must be >= 1, "
+                f"got {self.kv_compression_temporal_window}")
+
+        if not (0.0 <= self.kv_compression_outlier_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_outlier_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_outlier_threshold}")
+
+        if not (0.0 <= self.kv_compression_importance_threshold <= 1.0):
+            raise ValueError(
+                f"kv_compression_importance_threshold must be in [0.0, 1.0], "
+                f"got {self.kv_compression_importance_threshold}")
+
+        # Check compatibility with other features
+        if self.enable_kv_cache_compression and self.cpu_offload_gb > 0:
+            logger.warning(
+                "KV cache compression is enabled with CPU offload. "
+                "This may reduce the effectiveness of compression.")
+
+        # Log warning if compression is enabled but prefix caching is disabled
+        if (self.enable_kv_cache_compression and 
+            self.enable_prefix_caching is False):
+            logger.warning(
+                "KV cache compression is enabled but prefix caching is disabled. "
+                "Compression works best with prefix caching enabled.")
 
     def verify_with_parallel_config(
         self,
@@ -1787,6 +1888,10 @@ class ParallelConfig:
     """Port of the data parallel master."""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
+    data_parallel_external_lb: bool = False
+    """Whether to use "external" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Set implicitly when
+    data_parallel_rank is provided explicitly to vllm serve."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -1798,7 +1903,7 @@ class ParallelConfig:
     eplb_step_interval: int = 3000
     """
     Interval for rearranging experts in expert parallelism.
-    
+
     Note that if this is greater than the EPLB window size, only the metrics
     of the last `eplb_window_size` steps will be used for rearranging experts.
     """
@@ -1956,6 +2061,11 @@ class ParallelConfig:
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
+
+            if not (0 <= self.data_parallel_rank < self.data_parallel_size):
+                raise ValueError(
+                    f"data_parallel_rank ({self.data_parallel_rank})"
+                    f" must be in the range [0, {self.data_parallel_size})")
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -1963,6 +2073,10 @@ class ParallelConfig:
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
+            if self.data_parallel_external_lb:
+                raise ValueError("data_parallel_external_lb can only "
+                                 "be set when data_parallel_size > 1")
 
         if self.distributed_executor_backend == "external_launcher":
             import os
@@ -2112,11 +2226,12 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
-    """Cuda graph capture sizes, default is 512.
-    1. if one value is provided, then the capture list would follow the
+    cuda_graph_sizes: list[int] = field(default_factory=list)
+    """Cuda graph capture sizes
+    1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
+    2. if one value is provided, then the capture list would follow the
     pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    2. more than one value (e.g. 1 2 128) is provided, then the capture list
+    3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
     delay_factor: float = 0.0
@@ -2281,6 +2396,13 @@ class SchedulerConfig:
                 self.max_num_partial_prefills, self.max_long_partial_prefills,
                 self.long_prefill_token_threshold)
 
+        # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
+        # This avoids OOM in tight memory scenarios with small max_num_seqs,
+        # and prevents capture of many large graphs (>512) that would greatly
+        # increase startup time with limited performance benefit.
+        if not self.cuda_graph_sizes:
+            self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
+
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
         if (self.max_num_batched_tokens < self.max_model_len
@@ -2301,7 +2423,7 @@ class SchedulerConfig:
 
         if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
             logger.warning(
-                "max_num_batched_tokens (%d) exceeds max_num_seqs"
+                "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
                 self.max_num_seqs * self.max_model_len)
@@ -3081,6 +3203,11 @@ class MultiModalConfig:
     `{"images": 16, "videos": 2}`
     """
 
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities. 
+    For example, to set num_frames for video, set 
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
+
     mm_processor_kwargs: Optional[dict[str, object]] = None
     """
     Overrides for the multi-modal processor obtained from
@@ -3095,6 +3222,11 @@ class MultiModalConfig:
     disable_mm_preprocessor_cache: bool = False
     """
     If `True`, disable caching of the processed multi-modal inputs.
+    """
+
+    interleave_mm_strings: bool = False
+    """
+    Enable fully interleaved support for multimodal prompts.
     """
 
     def compute_hash(self) -> str:
@@ -4739,6 +4871,12 @@ class VllmConfig:
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.task == "classify":
+            # Maybe convert ForCausalLM into ForSequenceClassification model.
+            from vllm.model_executor.models.adapters import (
+                SequenceClassificationConfig)
+            SequenceClassificationConfig.verify_and_update_config(self)
 
     def __str__(self):
         return (
