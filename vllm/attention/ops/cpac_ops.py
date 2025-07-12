@@ -9,8 +9,13 @@ from typing import Tuple, Optional
 
 # Try to import the compiled CUDA extensions
 try:
-    from vllm._C import cpac_ops
-    HAS_CPAC_OPS = True
+    import vllm._C
+    # Check if CPAC ops are available in the compiled extension
+    if hasattr(vllm._C, 'cpac_ops'):
+        cpac_ops = vllm._C.cpac_ops
+        HAS_CPAC_OPS = True
+    else:
+        HAS_CPAC_OPS = False
 except ImportError:
     HAS_CPAC_OPS = False
     

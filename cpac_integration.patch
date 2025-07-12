@@ -1,0 +1,47 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 1234567..8901234 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -233,6 +233,7 @@ endif()
+ set(VLLM_EXT_SRC
+   "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
+   "csrc/mamba/causal_conv1d/causal_conv1d.cu"
+   "csrc/cache_kernels.cu"
++  "csrc/cpac_kernels.cu"
+   "csrc/attention/paged_attention_v1.cu"
+   "csrc/attention/paged_attention_v2.cu"
+   "csrc/attention/merge_attn_states.cu"
+@@ -253,7 +254,8 @@ set(VLLM_EXT_SRC
+   "csrc/cuda_utils_kernels.cu"
+   "csrc/prepare_inputs/advance_step.cu"
+   "csrc/custom_all_reduce.cu"
+-  "csrc/torch_bindings.cpp")
++  "csrc/torch_bindings.cpp"
++  "csrc/cpac_ops.cpp")
+ 
+ if(VLLM_GPU_LANG STREQUAL "CUDA")
+   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+
+diff --git a/csrc/torch_bindings.cpp b/csrc/torch_bindings.cpp
+index 2345678..9012345 100644
+--- a/csrc/torch_bindings.cpp
++++ b/csrc/torch_bindings.cpp
+@@ -15,6 +15,9 @@
+ #include "custom_all_reduce.h"
+ #include "prepare_inputs/advance_step.h"
+ 
++// Forward declaration for CPAC registration
++void register_cpac_ops(py::module& m);
++
+ PYBIND11_MODULE(_C, m) {
+   m.doc() = "vLLM C++ extension";
+ 
+@@ -123,4 +126,8 @@ PYBIND11_MODULE(_C, m) {
+   ops.def("advance_step_flashattn", &advance_step_flashattn,
+           "Advance one step for flash attention (FA and Fused FA)");
+ #endif
++
++#ifdef VLLM_CPAC_ENABLED
++  register_cpac_ops(m);
++#endif
+ }
