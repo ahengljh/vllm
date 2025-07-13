@@ -1,0 +1,20 @@
+Write a comprehensive guide to Python programming covering variables, functions, classes, and modules.
+Explain the theory of relativity in simple terms that a high school student could understand.
+What are the main causes and effects of climate change on global ecosystems?
+Describe the process of photosynthesis in plants and its importance to life on Earth.
+Compare and contrast the architectural styles of Gothic and Renaissance periods.
+Analyze the economic impacts of artificial intelligence on the job market.
+Explain how blockchain technology works and its potential applications beyond cryptocurrency.
+What are the key principles of quantum mechanics and how do they differ from classical physics?
+Describe the human immune system and how vaccines work to prevent diseases.
+Write a detailed comparison of different sorting algorithms and their time complexities.
+Explain the water cycle and its role in Earth's climate system.
+What are the major theories about the origin of the universe?
+Describe the structure and function of DNA in genetic inheritance.
+Analyze the causes and consequences of the Industrial Revolution.
+Explain the principles of machine learning and neural networks.
+What are the main types of renewable energy and their advantages/disadvantages?
+Describe the process of evolution by natural selection with examples.
+Explain the basics of computer networking including TCP/IP and OSI models.
+What are the psychological theories of human motivation and behavior?
+Describe the major biomes of Earth and their characteristic flora and fauna.
