@@ -31,9 +31,10 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
-from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
-                                   ImageProcessorItems, ImageSize,
-                                   MultiModalDataItems, MultiModalDataParser)
+from vllm.multimodal.parse import (AudioEmbeddingItems, AudioProcessorItems,
+                                   ImageEmbeddingItems, ImageProcessorItems,
+                                   ImageSize, MultiModalDataItems,
+                                   MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
@@ -999,16 +1000,22 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             processed_outputs["num_img_tokens"] = num_img_tokens
 
         if audio_data:
-            audio_features = processed_outputs['audio_input_features']
-            sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
-            feature_sizes = [
-                self.info.get_audio_num_frames(len(audio), sr)
-                for audio in audio_data
-            ]
-            processed_outputs['audio_input_features'] = [
-                audio_features[idx, :size]
-                for idx, size in enumerate(feature_sizes)
-            ]
+            # Check if we have pre-computed audio embeddings
+            if 'audio_embeds' in processed_outputs:
+                # Audio embeddings are already processed, no need to resize
+                pass
+            elif 'audio_input_features' in processed_outputs:
+                # Process raw audio features
+                audio_features = processed_outputs['audio_input_features']
+                sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
+                feature_sizes = [
+                    self.info.get_audio_num_frames(len(audio), sr)
+                    for audio in audio_data
+                ]
+                processed_outputs['audio_input_features'] = [
+                    audio_features[idx, :size]
+                    for idx, size in enumerate(feature_sizes)
+                ]
 
         return processed_outputs
 
@@ -1023,6 +1030,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             image_sizes=MultiModalFieldConfig.batched("image"),
             num_img_tokens=MultiModalFieldConfig.batched("image"),
             audio_input_features=MultiModalFieldConfig.batched("audio"),
+            audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -1058,13 +1066,19 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             return image_tokens
 
         def get_audio_replacement_phi4mm(item_idx: int):
-            audios = mm_items.get_items("audio", AudioProcessorItems)
-            # TODO(Isotr0py): support embedding inputs
-            audio_len = audios.get_audio_length(item_idx)
-            audio_frames = self.info.get_audio_num_frames(
-                audio_len, audio_processor.sampling_rate)
-            audio_embed_size = self.info._compute_audio_embed_size(
-                audio_frames)
+            audios = mm_items.get_items(
+                "audio", (AudioEmbeddingItems, AudioProcessorItems))
+            
+            if isinstance(audios, AudioEmbeddingItems):
+                # Handle pre-computed audio embeddings
+                audio_embed_size = audios.get_feature_size(item_idx)
+            else:
+                # Handle raw audio processing
+                audio_len = audios.get_audio_length(item_idx)
+                audio_frames = self.info.get_audio_num_frames(
+                    audio_len, audio_processor.sampling_rate)
+                audio_embed_size = self.info._compute_audio_embed_size(
+                    audio_frames)
 
             audio_tokens = [audio_token_id] * audio_embed_size
 
