@@ -60,7 +60,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(LlavaNextVideoProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"video": 1}
+        return {"video": None}  # No limit on number of videos
 
     def get_image_size_with_most_features(self) -> ImageSize:
         vision_encoder_info = self.get_vision_encoder_info()
@@ -137,7 +137,8 @@ class LlavaNextVideoDummyInputsBuilder(
         processor = self.info.get_hf_processor()
         video_token = processor.video_token
 
-        return video_token * num_videos
+        # Each video gets its own token placeholder
+        return " ".join([video_token] * num_videos)
 
     def get_dummy_mm_data(
         self,
@@ -396,15 +397,23 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         video_pixels = inputs["data"]
 
         if isinstance(video_pixels, torch.Tensor):
-            # TODO: support multiple videos per input
+            # Support multiple videos per input
             b, num_videos, num_frames, c, h, w = video_pixels.shape
-            assert (num_videos == 1)
-            stacked_pixels = video_pixels.view(b * num_videos * num_frames, c,
-                                               h, w)
-            stacked_embeddings = self._video_pixels_to_features(
-                self.vision_tower, stacked_pixels)
-            embeds = stacked_embeddings.view(b, num_frames,
-                                             *stacked_embeddings.shape[1:])
+            
+            # Process all videos in the batch
+            all_embeds = []
+            for batch_idx in range(b):
+                batch_embeds = []
+                for video_idx in range(num_videos):
+                    video_frames = video_pixels[batch_idx, video_idx]  # (num_frames, c, h, w)
+                    frame_embeddings = self._video_pixels_to_features(
+                        self.vision_tower, video_frames)
+                    # Flatten frame embeddings for this video
+                    video_embeds = frame_embeddings.flatten(0, 1)
+                    batch_embeds.append(video_embeds)
+                all_embeds.extend(batch_embeds)
+            
+            return all_embeds
 
         elif is_list_of(video_pixels, torch.Tensor):
             frames_per_videos = [v.shape[0] for v in video_pixels]
@@ -412,11 +421,11 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels)
             embeds = torch.split(stacked_embeddings, frames_per_videos, dim=0)
+            # Flatten frame dimension for each video
+            return [e.flatten(0, 1) for e in embeds]
         else:
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
-
-        return [e.flatten(0, 1) for e in embeds]
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
