@@ -978,6 +978,7 @@ class ProcessingCache:
     def get_by_uuid(
         self,
         uuid: str,
+        modality: Optional[str] = None,
         model_id: Optional[str] = None,
     ) -> Optional[MultiModalKwargsItem]:
         """
@@ -985,21 +986,22 @@ class ProcessingCache:
         
         Args:
             uuid: The UUID of the cached item
+            modality: Optional modality type (e.g., "raw_image", "raw_audio")
             model_id: Optional model ID for additional context
             
         Returns:
             The cached item if found, None otherwise
         """
         cache_key = MultiModalHasher.hash_media_with_uuid(
-            uuid=uuid,
-            model_id=model_id if model_id else ""
-        )
+            uuid=uuid, modality=modality if modality else "",
+            model_id=model_id if model_id else "")
         return self._cache.get(cache_key)
-    
+
     def put_by_uuid(
         self,
         uuid: str,
         output_kwargs: MultiModalKwargsItem,
+        modality: Optional[str] = None,
         model_id: Optional[str] = None,
     ) -> None:
         """
@@ -1008,12 +1010,12 @@ class ProcessingCache:
         Args:
             uuid: The UUID of the item to cache
             output_kwargs: The processed item to cache
+            modality: Optional modality type (e.g., "raw_image", "raw_audio")
             model_id: Optional model ID for additional context
         """
         cache_key = MultiModalHasher.hash_media_with_uuid(
-            uuid=uuid,
-            model_id=model_id if model_id else ""
-        )
+            uuid=uuid, modality=modality if modality else "",
+            model_id=model_id if model_id else "")
         self._cache[cache_key] = output_kwargs
 
     def get(
@@ -1035,16 +1037,14 @@ class ProcessingCache:
         self._maybe_log_cache_stats()
 
         # For URL inputs, use URL-only hashing instead of full content
-        if isinstance(input_item, str) and (
-            input_item.startswith(('http://', 'https://', 'data:', 'file://'))
-        ):
+        if isinstance(input_item, str) and (input_item.startswith(
+            ('http://', 'https://', 'data:', 'file://'))):
             cache_key = MultiModalHasher.hash_media_with_uuid(
                 uuid=None,
                 media_url=input_item,
                 model_id=model_id,
                 modality=modality,
-                **input_kwargs
-            )
+                **input_kwargs)
         else:
             cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                      **{modality: input_item},
@@ -1066,16 +1066,14 @@ class ProcessingCache:
         input_kwargs: Mapping[str, object],
     ) -> ProcessingCacheOptionalItem:
         # For URL inputs, use URL-only hashing instead of full content
-        if isinstance(input_item, str) and (
-            input_item.startswith(('http://', 'https://', 'data:', 'file://'))
-        ):
+        if isinstance(input_item, str) and (input_item.startswith(
+            ('http://', 'https://', 'data:', 'file://'))):
             cache_key = MultiModalHasher.hash_media_with_uuid(
                 uuid=None,
                 media_url=input_item,
                 model_id=model_id,
                 modality=modality,
-                **input_kwargs
-            )
+                **input_kwargs)
         else:
             cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                      **{modality: input_item},
@@ -1100,16 +1098,14 @@ class ProcessingCache:
         (see [`get`][vllm.multimodal.processing.ProcessingCache.get]).
         """
         # For URL inputs, use URL-only hashing instead of full content
-        if isinstance(input_item, str) and (
-            input_item.startswith(('http://', 'https://', 'data:', 'file://'))
-        ):
+        if isinstance(input_item, str) and (input_item.startswith(
+            ('http://', 'https://', 'data:', 'file://'))):
             cache_key = MultiModalHasher.hash_media_with_uuid(
                 uuid=None,
                 media_url=input_item,
                 model_id=model_id,
                 modality=modality,
-                **input_kwargs
-            )
+                **input_kwargs)
         else:
             cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                      **{modality: input_item},

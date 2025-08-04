@@ -71,7 +71,7 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
 
     type: Required[Literal["audio_url"]]
     """The type of the content part."""
-    
+
     uuid: Optional[str]
     """Optional UUID to identify cached media content."""
 
@@ -85,7 +85,7 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
     """
     type: Required[Literal["image_embeds"]]
     """The type of the content part."""
-    
+
     uuid: Optional[str]
     """Optional UUID to identify cached media content."""
 
@@ -102,7 +102,7 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 
     type: Required[Literal["video_url"]]
     """The type of the content part."""
-    
+
     uuid: Optional[str]
     """Optional UUID to identify cached media content."""
 
@@ -110,10 +110,10 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 class CustomChatCompletionContentPartImageParam(TypedDict, total=False):
     """Extended image param that includes optional UUID field."""
     image_url: Required[dict[str, str]]
-    
+
     type: Required[Literal["image_url"]]
     """The type of the content part."""
-    
+
     uuid: Optional[str]
     """Optional UUID to identify cached media content."""
 
@@ -713,44 +713,37 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
-        
+
         # Access to the processing cache for UUID-based lookups
         # Import here to avoid circular imports
         from vllm.multimodal import MULTIMODAL_REGISTRY
         self._cache = getattr(MULTIMODAL_REGISTRY, '_processing_cache', None)
 
     def parse_image(self, image_url: str, uuid: Optional[str] = None) -> None:
-        # Simple UUID-based caching - store media directly
-        if uuid:
-            # Create a simple cache key for UUID
-            from vllm.multimodal.hasher import MultiModalHasher
-            cache_key = f"uuid:{uuid}"
-            
-            # Check if we have this UUID in cache
-            if hasattr(self, '_uuid_cache'):
-                if cache_key in self._uuid_cache:
-                    image = self._uuid_cache[cache_key]
-                    placeholder = self._tracker.add("image", image)
-                    self._add_placeholder("image", placeholder)
-                    return
-            else:
-                # Initialize UUID cache
-                self._uuid_cache = {}
-        
+        # UUID-based caching using shared ProcessingCache
+        if uuid and self._cache:
+            # Try to get from shared cache first
+            cached_image = self._cache.get_by_uuid(uuid, "raw_image")
+            if cached_image is not None:
+                logger.debug(f"UUID cache hit for image '{uuid}'")
+                placeholder = self._tracker.add("image", cached_image)
+                self._add_placeholder("image", placeholder)
+                return
+
         # Allow empty URL if UUID is provided and expecting cache hit
         if not image_url and uuid:
-            logger.warning(f"Media with UUID '{uuid}' not found in cache and no URL provided")
+            logger.warning(f"Image with UUID '{uuid}' not found in cache and no URL provided")
             return
-            
+
         image = self._connector.fetch_image(image_url)
 
         placeholder = self._tracker.add("image", image)
         self._add_placeholder("image", placeholder)
-        
-        # Cache the result if UUID is provided
-        if uuid and hasattr(self, '_uuid_cache'):
-            cache_key = f"uuid:{uuid}"
-            self._uuid_cache[cache_key] = image
+
+        # Store in shared cache if UUID is provided
+        if uuid and self._cache:
+            self._cache.put_by_uuid(uuid, image, "raw_image")
+            logger.debug(f"Cached image with UUID '{uuid}'")
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
@@ -772,36 +765,30 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str, uuid: Optional[str] = None) -> None:
-        # Simple UUID-based caching - store media directly
-        if uuid:
-            # Create a simple cache key for UUID
-            cache_key = f"uuid:{uuid}"
-            
-            # Check if we have this UUID in cache
-            if hasattr(self, '_uuid_cache'):
-                if cache_key in self._uuid_cache:
-                    audio = self._uuid_cache[cache_key]
-                    placeholder = self._tracker.add("audio", audio)
-                    self._add_placeholder("audio", placeholder)
-                    return
-            else:
-                # Initialize UUID cache if not exists
-                self._uuid_cache = {}
-        
+        # UUID-based caching using shared ProcessingCache
+        if uuid and self._cache:
+            # Try to get from shared cache first
+            cached_audio = self._cache.get_by_uuid(uuid, "raw_audio")
+            if cached_audio is not None:
+                logger.debug(f"UUID cache hit for audio '{uuid}'")
+                placeholder = self._tracker.add("audio", cached_audio)
+                self._add_placeholder("audio", placeholder)
+                return
+
         # Allow empty URL if UUID is provided and expecting cache hit
         if not audio_url and uuid:
-            logger.warning(f"Media with UUID '{uuid}' not found in cache and no URL provided")
+            logger.warning(f"Audio with UUID '{uuid}' not found in cache and no URL provided")
             return
-            
+
         audio = self._connector.fetch_audio(audio_url)
 
         placeholder = self._tracker.add("audio", audio)
         self._add_placeholder("audio", placeholder)
-        
-        # Cache the result if UUID is provided
-        if uuid and hasattr(self, '_uuid_cache'):
-            cache_key = f"uuid:{uuid}"
-            self._uuid_cache[cache_key] = audio
+
+        # Store in shared cache if UUID is provided
+        if uuid and self._cache:
+            self._cache.put_by_uuid(uuid, audio, "raw_audio")
+            logger.debug(f"Cached audio with UUID '{uuid}'")
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
         audio_data = input_audio.get("data", "")
@@ -811,36 +798,30 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str, uuid: Optional[str] = None) -> None:
-        # Simple UUID-based caching - store media directly
-        if uuid:
-            # Create a simple cache key for UUID
-            cache_key = f"uuid:{uuid}"
-            
-            # Check if we have this UUID in cache
-            if hasattr(self, '_uuid_cache'):
-                if cache_key in self._uuid_cache:
-                    video = self._uuid_cache[cache_key]
-                    placeholder = self._tracker.add("video", video)
-                    self._add_placeholder("video", placeholder)
-                    return
-            else:
-                # Initialize UUID cache if not exists
-                self._uuid_cache = {}
-        
+        # UUID-based caching using shared ProcessingCache
+        if uuid and self._cache:
+            # Try to get from shared cache first
+            cached_video = self._cache.get_by_uuid(uuid, "raw_video")
+            if cached_video is not None:
+                logger.debug(f"UUID cache hit for video '{uuid}'")
+                placeholder = self._tracker.add("video", cached_video)
+                self._add_placeholder("video", placeholder)
+                return
+
         # Allow empty URL if UUID is provided and expecting cache hit
         if not video_url and uuid:
-            logger.warning(f"Media with UUID '{uuid}' not found in cache and no URL provided")
+            logger.warning(f"Video with UUID '{uuid}' not found in cache and no URL provided")
             return
-            
+
         video = self._connector.fetch_video(video_url=video_url)
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder("video", placeholder)
-        
-        # Cache the result if UUID is provided
-        if uuid and hasattr(self, '_uuid_cache'):
-            cache_key = f"uuid:{uuid}"
-            self._uuid_cache[cache_key] = video
+
+        # Store in shared cache if UUID is provided
+        if uuid and self._cache:
+            self._cache.put_by_uuid(uuid, video, "raw_video")
+            logger.debug(f"Cached video with UUID '{uuid}'")
 
 
 class AsyncMultiModalContentParser(BaseMultiModalContentParser):
@@ -853,42 +834,46 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             media_io_kwargs=self._tracker._model_config.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path
         )
+        
+        # Access to the processing cache for UUID-based lookups
+        # Import here to avoid circular imports
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+        self._cache = getattr(MULTIMODAL_REGISTRY, '_processing_cache', None)
 
     def parse_image(self, image_url: str, uuid: Optional[str] = None) -> None:
-        # Check cache first if UUID is provided
-        if uuid:
-            cache_key = f"uuid:{uuid}"
-            if hasattr(self, '_uuid_cache'):
-                if cache_key in self._uuid_cache:
-                    # Create a future that's already resolved with cached image
-                    future = asyncio.Future()
-                    future.set_result(self._uuid_cache[cache_key])
-                    placeholder = self._tracker.add("image", future)
-                    self._add_placeholder("image", placeholder)
-                    return
-            else:
-                self._uuid_cache = {}
-        
+        # UUID-based caching using shared ProcessingCache
+        if uuid and self._cache:
+            # Try to get from shared cache first
+            cached_image = self._cache.get_by_uuid(uuid, "raw_image")
+            if cached_image is not None:
+                # Create a future that's already resolved with cached image
+                future = asyncio.Future()
+                future.set_result(cached_image)
+                logger.debug(f"UUID cache hit for image '{uuid}'")
+                placeholder = self._tracker.add("image", future)
+                self._add_placeholder("image", placeholder)
+                return
+
         # Allow empty URL if UUID is provided and expecting cache hit
         if not image_url and uuid:
-            logger.warning(f"Media with UUID '{uuid}' not found in cache and no URL provided")
+            logger.warning(f"Image with UUID '{uuid}' not found in cache and no URL provided")
             return
-            
+
         # Only fetch if we have a URL
         image_coro = self._connector.fetch_image_async(image_url)
-        
+
         # Store in cache if UUID provided
-        if uuid:
+        if uuid and self._cache:
             async def cache_after_fetch():
                 image = await image_coro
-                if hasattr(self, '_uuid_cache'):
-                    self._uuid_cache[f"uuid:{uuid}"] = image
+                self._cache.put_by_uuid(uuid, image, "raw_image")
+                logger.debug(f"Cached image with UUID '{uuid}'")
                 return image
-            
+
             placeholder = self._tracker.add("image", cache_after_fetch())
         else:
             placeholder = self._tracker.add("image", image_coro)
-            
+
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
@@ -918,40 +903,39 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str, uuid: Optional[str] = None) -> None:
-        # Check cache first if UUID is provided
-        if uuid:
-            cache_key = f"uuid:{uuid}"
-            if hasattr(self, '_uuid_cache'):
-                if cache_key in self._uuid_cache:
-                    # Create a future that's already resolved with cached audio
-                    future = asyncio.Future()
-                    future.set_result(self._uuid_cache[cache_key])
-                    placeholder = self._tracker.add("audio", future)
-                    self._add_placeholder("audio", placeholder)
-                    return
-            else:
-                self._uuid_cache = {}
-        
+        # UUID-based caching using shared ProcessingCache
+        if uuid and self._cache:
+            # Try to get from shared cache first
+            cached_audio = self._cache.get_by_uuid(uuid, "raw_audio")
+            if cached_audio is not None:
+                # Create a future that's already resolved with cached audio
+                future = asyncio.Future()
+                future.set_result(cached_audio)
+                logger.debug(f"UUID cache hit for audio '{uuid}'")
+                placeholder = self._tracker.add("audio", future)
+                self._add_placeholder("audio", placeholder)
+                return
+
         # Allow empty URL if UUID is provided and expecting cache hit
         if not audio_url and uuid:
-            logger.warning(f"Media with UUID '{uuid}' not found in cache and no URL provided")
+            logger.warning(f"Audio with UUID '{uuid}' not found in cache and no URL provided")
             return
-            
+
         # Only fetch if we have a URL
         audio_coro = self._connector.fetch_audio_async(audio_url)
-        
+
         # Store in cache if UUID provided
-        if uuid:
+        if uuid and self._cache:
             async def cache_after_fetch():
                 audio = await audio_coro
-                if hasattr(self, '_uuid_cache'):
-                    self._uuid_cache[f"uuid:{uuid}"] = audio
+                self._cache.put_by_uuid(uuid, audio, "raw_audio")
+                logger.debug(f"Cached audio with UUID '{uuid}'")
                 return audio
-            
+
             placeholder = self._tracker.add("audio", cache_after_fetch())
         else:
             placeholder = self._tracker.add("audio", audio_coro)
-            
+
         self._add_placeholder("audio", placeholder)
 
     def parse_input_audio(self, input_audio: InputAudio) -> None:
@@ -962,40 +946,39 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url)
 
     def parse_video(self, video_url: str, uuid: Optional[str] = None) -> None:
-        # Check cache first if UUID is provided
-        if uuid:
-            cache_key = f"uuid:{uuid}"
-            if hasattr(self, '_uuid_cache'):
-                if cache_key in self._uuid_cache:
-                    # Create a future that's already resolved with cached video
-                    future = asyncio.Future()
-                    future.set_result(self._uuid_cache[cache_key])
-                    placeholder = self._tracker.add("video", future)
-                    self._add_placeholder("video", placeholder)
-                    return
-            else:
-                self._uuid_cache = {}
-        
+        # UUID-based caching using shared ProcessingCache
+        if uuid and self._cache:
+            # Try to get from shared cache first
+            cached_video = self._cache.get_by_uuid(uuid, "raw_video")
+            if cached_video is not None:
+                # Create a future that's already resolved with cached video
+                future = asyncio.Future()
+                future.set_result(cached_video)
+                logger.debug(f"UUID cache hit for video '{uuid}'")
+                placeholder = self._tracker.add("video", future)
+                self._add_placeholder("video", placeholder)
+                return
+
         # Allow empty URL if UUID is provided and expecting cache hit
         if not video_url and uuid:
-            logger.warning(f"Media with UUID '{uuid}' not found in cache and no URL provided")
+            logger.warning(f"Video with UUID '{uuid}' not found in cache and no URL provided")
             return
-            
+
         # Only fetch if we have a URL
         video_coro = self._connector.fetch_video_async(video_url=video_url)
-        
+
         # Store in cache if UUID provided
-        if uuid:
+        if uuid and self._cache:
             async def cache_after_fetch():
                 video = await video_coro
-                if hasattr(self, '_uuid_cache'):
-                    self._uuid_cache[f"uuid:{uuid}"] = video
+                self._cache.put_by_uuid(uuid, video, "raw_video")
+                logger.debug(f"Cached video with UUID '{uuid}'")
                 return video
-            
+
             placeholder = self._tracker.add("video", cache_after_fetch())
         else:
             placeholder = self._tracker.add("video", video_coro)
-            
+
         self._add_placeholder("video", placeholder)
 
 

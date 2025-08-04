@@ -44,7 +44,7 @@ class MultiModalHasher:
             A unique hash string for the media
         """
         hasher = blake3()
-        
+
         if uuid:
             # If UUID is provided, use it as the primary key
             hasher.update(b"uuid:")
@@ -69,7 +69,7 @@ class MultiModalHasher:
             for k, v in kwargs.items():
                 hasher.update(k.encode("utf-8"))
                 hasher.update(cls.serialize_item(v))
-                
+
         return hasher.hexdigest()
 
     @classmethod
