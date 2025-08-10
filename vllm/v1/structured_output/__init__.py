@@ -11,10 +11,9 @@ from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+from vllm.v1.structured_output.unified_backend import UnifiedBackendManager
 
 if TYPE_CHECKING:
     import numpy as np
@@ -87,30 +86,14 @@ class StructuredOutputManager:
             assert request.sampling_params is not None
             backend = request.sampling_params.guided_decoding.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if backend == "xgrammar":
-                self.backend = XgrammarBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif backend == "guidance":
-                self.backend = GuidanceBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif backend == "outlines":
-                from vllm.v1.structured_output.backend_outlines import (
-                    OutlinesBackend)
-
-                self.backend = OutlinesBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported structured output backend: {backend}")
+            # Unified backend handles caching and lazy loading
+            self.backend = UnifiedBackendManager(
+                vllm_config=self.vllm_config,
+                tokenizer=self.tokenizer,
+                vocab_size=vocab_size,
+                preferred_backend=backend,
+                cache_size=1000
+            )
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
@@ -123,12 +106,10 @@ class StructuredOutputManager:
 
         # Note that the request was validated in the engine core client,
         # so at this point we know it is a supported type of request.
-        #
-        # TODO: we still need to handle xgrammar compilation failures,
-        # though it should be unlikely as we test that up front as well.
         request_type, grammar_spec = key
 
         assert self.backend is not None
+        # Backend checks cache first, compiles if needed
         return self.backend.compile_grammar(request_type, grammar_spec)
 
     def _fill_bitmasks(
