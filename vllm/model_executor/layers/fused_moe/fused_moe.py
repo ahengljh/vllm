@@ -694,6 +694,12 @@ def get_moe_configs(
     batch sizes to configurations of the fused_moe kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
+    
+    Configuration loading priority:
+    1. User-defined configs (VLLM_TUNED_CONFIG_FOLDER)
+    2. Version-specific configs (e.g., triton_3_4_0/)
+    3. Default configs in the main configs directory
+    4. Legacy configs (legacy_configs/)
     """
 
     # First look up if an optimized configuration is available in the configs
@@ -702,31 +708,55 @@ def get_moe_configs(
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
 
     config_file_paths = []
+    base_config_dir = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "configs")
 
-    # note that we prioritize user defined config
+    # Priority 1: User defined config
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         user_defined_config_file_path = os.path.join(
             user_defined_config_folder, json_file_name)
-        config_file_paths.append(user_defined_config_file_path)
+        config_file_paths.append(("user-defined", user_defined_config_file_path))
 
-    default_config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
-    config_file_paths.append(default_config_file_path)
+    # Priority 2: Version-specific configs (e.g., triton_3_4_0)
+    try:
+        import triton
+        triton_version = getattr(triton, "__version__", None)
+        if triton_version:
+            # Convert version string to folder name (e.g., "3.4.0" -> "triton_3_4_0")
+            version_parts = triton_version.split('.')
+            if len(version_parts) >= 3:
+                version_folder = f"triton_{version_parts[0]}_{version_parts[1]}_{version_parts[2]}"
+                versioned_config_path = os.path.join(
+                    base_config_dir, version_folder, json_file_name)
+                if os.path.exists(os.path.dirname(versioned_config_path)):
+                    config_file_paths.append((f"triton-{triton_version}", versioned_config_path))
+    except ImportError:
+        pass  # Triton not available
 
-    for config_file_path in config_file_paths:
+    # Priority 3: Default config in main directory
+    default_config_file_path = os.path.join(base_config_dir, json_file_name)
+    config_file_paths.append(("default", default_config_file_path))
+    
+    # Priority 4: Legacy configs
+    legacy_config_path = os.path.join(base_config_dir, "legacy_configs", json_file_name)
+    if os.path.exists(os.path.dirname(legacy_config_path)):
+        config_file_paths.append(("legacy", legacy_config_path))
+
+    for source, config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
             with open(config_file_path) as f:
-                logger.info("Using configuration from %s for MoE layer.",
-                            config_file_path)
+                logger.info("Using %s configuration from %s for MoE layer.",
+                            source, config_file_path)
                 # If a configuration has been found, return it
                 return {int(key): val for key, val in json.load(f).items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration
+    config_paths_str = ", ".join([path for _, path in config_file_paths])
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
-         "Config file not found at %s"), config_file_paths)
+         "Config file not found at: %s"), config_paths_str)
     return None
 
 

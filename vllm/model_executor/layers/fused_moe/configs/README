@@ -1,12 +1,67 @@
-This directory contains tuned configurations for different settings of the fused_moe kernel.
-For different settings of
+# MoE Tuned Configurations
+
+This directory contains optimized configurations for the fused_moe kernel, with support for version-specific tuning.
+
+## Directory Structure
+
+```
+configs/
+├── *.json                  # Default configurations
+├── triton_3_4_0/          # Triton 3.4.0 specific configs
+│   └── *.json
+├── legacy_configs/        # Older configurations for compatibility
+│   └── *.json
+└── README                 # This file
+```
+
+## Configuration Format
+
+For different settings of:
 - E (number of experts)
 - N (intermediate size)
 - device_name (torch.cuda.get_device_name())
-the JSON file contains a mapping from M (batch size) to the chosen configuration.
 
-The example configurations provided are for the Mixtral model for TP2 on H100
-and TP4 on A100. Mixtral has intermediate size N = 14336, i.e. for TP2 we have
-N = 7168 and for TP4 we have N = 3584.
+Each JSON file contains a mapping from M (batch size) to the chosen configuration.
 
-See `benchmark/kernels/benchmark_moe.py` on how to generate these config files.
+## Configuration Loading Priority
+
+The system searches for configurations in the following order:
+1. **User-defined**: Path specified by `VLLM_TUNED_CONFIG_FOLDER` environment variable
+2. **Version-specific**: Matching current Triton version (e.g., `triton_3_4_0/`)
+3. **Default**: Main configs directory
+4. **Legacy**: `legacy_configs/` folder for backward compatibility
+
+## Using Custom Configurations
+
+Set the environment variable to use custom tuned configs:
+```bash
+export VLLM_TUNED_CONFIG_FOLDER=/path/to/your/configs
+```
+
+## Generating Configurations
+
+Use `benchmarks/kernels/benchmark_moe.py` to generate optimized configurations:
+
+```bash
+python benchmarks/kernels/benchmark_moe.py \
+    --model <model_name> \
+    --tp <tensor_parallelism> \
+    --num-tokens <batch_size>
+```
+
+### Example Configurations
+
+The provided configurations include:
+- Mixtral model for TP2 on H100 (N = 7168)
+- Mixtral model for TP4 on A100 (N = 3584)
+
+Note: Mixtral has intermediate size N = 14336, divided by the tensor parallelism factor.
+
+## Adding Version-Specific Configs
+
+When tuning for a specific Triton version:
+1. Create a directory named `triton_X_Y_Z/` (e.g., `triton_3_4_0/`)
+2. Run benchmarks with that Triton version
+3. Place generated configs in the version-specific folder
+
+This ensures optimal performance across different Triton releases without conflicts.
