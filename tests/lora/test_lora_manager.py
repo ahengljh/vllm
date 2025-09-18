@@ -59,7 +59,8 @@ def test_from_lora_tensors(sql_lora_files, device):
         assert lora.lora_b.device == torch.device(device)
         assert (lora.lora_a.shape[0] == lora.lora_b.shape[1]
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
-        assert lora.lora_a.shape[0] == 8
+        assert lora.lora_a.shape[1] == 8
+        assert lora.embeddings_tensor is None
 
 
 def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
