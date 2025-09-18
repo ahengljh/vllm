@@ -45,13 +45,13 @@ from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.platforms import current_platform
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, sharded_weight_loader)
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
@@ -876,16 +876,13 @@ class Qwen3NextModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        lora_config = vllm_config.lora_config
         speculative_config = vllm_config.speculative_config
         enable_eplb = parallel_config.enable_eplb
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
@@ -1068,8 +1065,6 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.model = Qwen3NextModel(vllm_config=vllm_config,
                                     prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
@@ -1077,7 +1072,7 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            if not lora_config else current_platform.get_lora_vocab_padding_size(),
             prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
