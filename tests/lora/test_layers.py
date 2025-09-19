@@ -503,7 +503,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
                                 vocab_size,
                                 params_dtype=torch.float16)
         linear.weight.data = torch.rand_like(linear.weight.data)
-        linear.weight.data[:, vocab_size:] = 0
+
         logits_processor = LogitsProcessor(vocab_size, vocab_size)
         lora_logits_processor = LogitsProcessorWithLoRA(
             logits_processor, 1024, linear.weight.dtype, linear.weight.device,
@@ -526,7 +526,6 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             generate_embeddings_tensor=1024,
         )
         embeddings_tensor = list(lora_dict.values())[0].embeddings_tensor
-        embeddings_tensor_len = embeddings_tensor.shape[0]
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
             active_lora_ids=list(lora_dict.keys()),
@@ -549,9 +548,9 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 
         original_lm_head = deepcopy(linear)
 
-        linear.weight[logits_processor.
-                      org_vocab_size:logits_processor.org_vocab_size +
-                      embeddings_tensor_len] = embeddings_tensor
+        # linear.weight[logits_processor.
+        #               org_vocab_size:logits_processor.org_vocab_size +
+        #               embeddings_tensor_len] = embeddings_tensor
 
         logits_processor.org_vocab_size = vocab_size
         expected_results: list[torch.Tensor] = []
@@ -560,8 +559,8 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
             result = logits_processor._get_logits(hidden_states=input_,
                                                   lm_head=linear,
                                                   embedding_bias=None)
-            result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
-            result += input_ @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
+            # result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
+            result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
         logits_processor.org_vocab_size = vocab_size
