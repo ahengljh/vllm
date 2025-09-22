@@ -30,7 +30,6 @@ class DummyLoRAManager:
         module_name: str,
         weight: torch.Tensor,
         rank: int = 8,
-        generate_embeddings_tensor: int = 0,
     ):
         lora = LoRALayerWeights(
             module_name,
@@ -43,13 +42,6 @@ class DummyLoRAManager:
                               dtype=weight.dtype,
                               device=self._device),
         )
-        if generate_embeddings_tensor:
-            lora.embeddings_tensor = torch.rand(
-                5,
-                generate_embeddings_tensor,
-                dtype=weight.dtype,
-                device=self._device,
-            )
         self.set_module_lora(module_name, lora)
 
         return lora
@@ -61,7 +53,6 @@ class DummyLoRAManager:
         output_dim: int,
         rank=8,
         noop=False,
-        embeddings_tensor=None,
     ):
         lora = LoRALayerWeights(
             module_name,
@@ -69,7 +60,6 @@ class DummyLoRAManager:
             lora_alpha=1,
             lora_a=torch.rand([input_dim, rank], device="cuda"),
             lora_b=torch.rand([rank, output_dim], device="cuda"),
-            embeddings_tensor=embeddings_tensor,
         )
         self.set_module_lora(module_name, lora)
         return lora

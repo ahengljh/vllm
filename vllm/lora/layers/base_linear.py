@@ -103,7 +103,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
     ):
         # Except for QKVParallelLinearWithLoRA and

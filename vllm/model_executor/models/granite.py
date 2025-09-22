@@ -263,9 +263,7 @@ class GraniteModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
@@ -423,8 +421,7 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-            self.lm_head = ParallelLMHead(
+                            self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,

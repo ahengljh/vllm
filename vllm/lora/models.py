@@ -101,11 +101,6 @@ class LoRAModel:
             loras=self.loras.copy(),
         )
 
-    @property
-    def extra_vocab_size(self) -> int:
-        return max(lora.extra_vocab_size
-                   for lora in self.loras.values()) if self.loras else 0
-
     def get_lora(self, module_name: str) -> Optional[LoRALayerWeights]:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
@@ -113,7 +108,6 @@ class LoRAModel:
     def check_lora_name(self, lora_name: str) -> bool:
         return lora_name in self.loras
 
-    # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
     def from_lora_tensors(
         cls,
@@ -122,10 +116,6 @@ class LoRAModel:
         peft_helper: PEFTHelper,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
-        embeddings: Optional[dict[str, torch.Tensor]] = None,
-        target_embedding_padding: Optional[int] = None,
-        embedding_modules: Optional[dict[str, str]] = None,
-        embedding_padding_modules: Optional[list[str]] = None,
         weights_mapper: Optional[WeightsMapper] = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
@@ -135,21 +125,8 @@ class LoRAModel:
             module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
             if module_name not in loras:
-                lora_embeddings_tensor = None
-                if embeddings:
-                    assert embedding_modules is not None
-                    embeddings_module = next(
-                        (k for k in embedding_modules if k in module_name),
-                        None)
-                    if embeddings_module:
-                        lora_embeddings_tensor = embeddings[
-                            embedding_modules[embeddings_module]].to(
-                                device=device, dtype=dtype)
-                        if pin_memory:
-                            lora_embeddings_tensor = (
-                                lora_embeddings_tensor.pin_memory())
                 loras[module_name] = LoRALayerWeights.from_config(
-                    module_name, peft_helper, lora_embeddings_tensor)
+                    module_name, peft_helper)
 
             if is_bias:
                 loras[module_name].bias = tensor.to(device=device,
@@ -167,15 +144,6 @@ class LoRAModel:
             else:
                 loras[module_name].lora_b = tensor.to(device=device,
                                                       dtype=dtype).t()
-                assert embedding_padding_modules is not None
-                if any(name in module_name
-                       for name in embedding_padding_modules
-                       ) and target_embedding_padding is not None:
-                    lora_b = loras[module_name].lora_b
-                    assert target_embedding_padding >= lora_b.shape[1]
-                    addition = target_embedding_padding - lora_b.shape[1]
-                    loras[module_name].lora_b = torch.nn.functional.pad(
-                        lora_b, (0, addition))
                 if pin_memory:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
@@ -195,9 +163,6 @@ class LoRAModel:
             lora_model_id: Optional[int] = None,
             device: str = "cuda",
             dtype: Optional[torch.dtype] = None,
-            target_embedding_padding: Optional[int] = None,
-            embedding_modules: Optional[dict[str, str]] = None,
-            embedding_padding_modules: Optional[list[str]] = None,
             weights_mapper: Optional[WeightsMapper] = None,
             tensorizer_config_dict: Optional[dict] = None) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
@@ -300,14 +265,10 @@ class LoRAModel:
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
-        embeddings = None
-        if os.path.isfile(new_embeddings_tensor_path):
-            embeddings = safetensors.torch.load_file(
-                new_embeddings_tensor_path)
-        elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(new_embeddings_bin_file_path,
-                                    map_location=device,
-                                    weights_only=True)
+        if os.path.isfile(new_embeddings_tensor_path) or os.path.isfile(
+                new_embeddings_bin_file_path):
+            raise ValueError("Additional vocabulary support for LoRA adapters "
+                             "is no longer available.")
 
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
@@ -316,10 +277,6 @@ class LoRAModel:
             peft_helper=peft_helper,
             device=device,
             dtype=dtype,
-            embeddings=embeddings,
-            target_embedding_padding=target_embedding_padding,
-            embedding_modules=embedding_modules,
-            embedding_padding_modules=embedding_padding_modules,
             weights_mapper=weights_mapper)
 
 
@@ -433,7 +390,6 @@ class LoRAModelManager:
                         f"Adapter bias cannot be used for {module_name}"
                         " without --enable-lora-bias.")
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
-                                module_lora.embeddings_tensor,
                                 module_lora.bias)
             else:
                 module.reset_lora(index)
@@ -463,7 +419,6 @@ class LoRAModelManager:
             self.lora_index_to_id,
             self.lora_slots + 1,
             self.vocab_size,
-            self.lora_config.lora_extra_vocab_size,
         )
 
     def remove_all_adapters(self):
@@ -553,38 +508,17 @@ class LoRAModelManager:
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
-                assert embedding_modules is not None
-                if parts[-1] in embedding_modules:
-                    input_dim = (module.base_layer.org_vocab_size +
-                                 self.lora_config.lora_extra_vocab_size if
-                                 hasattr(module.base_layer, "org_vocab_size")
-                                 else module.base_layer.weight.shape[1])
-                    output_dim = module.base_layer.embedding_dim if hasattr(
-                        module.base_layer,
-                        "embedding_dim") else module.base_layer.weight.shape[0]
-                    embeddings_tensor_dim = (module.base_layer.embedding_dim if
-                                             hasattr(module.base_layer,
-                                                     "embedding_dim") else
-                                             module.base_layer.weight.shape[1])
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name,
-                        input_dim,
-                        output_dim,
-                        rank,
-                        module.lora_a_stacked[0].dtype,
-                        "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim,
-                        bias_enabled=bias_enabled)
-                else:
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name,
-                        module.lora_a_stacked[0].shape[-1],
-                        module.lora_b_stacked[0].shape[-2],
-                        rank,
-                        module.lora_a_stacked[0].dtype,
-                        "cpu",
-                        bias_enabled=bias_enabled,
-                    )
+                input_dim = module.lora_a_stacked[0].shape[-1]
+                output_dim = module.lora_b_stacked[0].shape[-2]
+                lora = LoRALayerWeights.create_dummy_lora_weights(
+                    module_name,
+                    input_dim,
+                    output_dim,
+                    rank,
+                    module.lora_a_stacked[0].dtype,
+                    "cpu",
+                    bias_enabled=bias_enabled,
+                )
                 lora.optimize()
             else:
                 parts = module_name.split(".")

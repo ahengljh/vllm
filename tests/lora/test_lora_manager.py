@@ -39,42 +39,20 @@ DEFAULT_DTYPE = torch.get_default_dtype()
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_from_lora_tensors(sql_lora_files, device):
+def test_from_lora_tensors_rejects_new_embeddings(sql_lora_files, device):
     tensors = load_file(
         os.path.join(sql_lora_files, "adapter_model.safetensors"))
-    new_embeddings = load_file(
-        os.path.join(sql_lora_files, "new_embeddings.safetensors"))
+    expected_modules = {name.split(".")[-1] for name in tensors.keys()}
 
     peft_helper = PEFTHelper.from_local_dir(sql_lora_files,
                                             max_position_embeddings=4096)
-    lora_model = LoRAModel.from_lora_tensors(
-        1,
-        tensors,
-        peft_helper=peft_helper,
-        device=device,
-        embeddings=new_embeddings,
-        embedding_modules=EMBEDDING_MODULES,
-        embedding_padding_modules=EMBEDDING_PADDING_MODULES)
-    for module_name, lora in lora_model.loras.items():
-        assert lora.module_name == module_name
-        assert lora.rank == 8
-        assert lora.lora_alpha == 16
-        assert lora.lora_a is not None
-        assert lora.lora_b is not None
-        assert lora.lora_a.device == torch.device(device)
-        assert lora.lora_b.device == torch.device(device)
-        assert (lora.lora_a.shape[1] == lora.lora_b.shape[0]
-                ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
-        assert lora.lora_a.shape[1] == 8
-        embeddings_module = next(
-            (k for k in EMBEDDING_MODULES if k in module_name), None)
-        if embeddings_module:
-            assert torch.equal(
-                lora.embeddings_tensor,
-                new_embeddings[EMBEDDING_MODULES[embeddings_module]].to(
-                    device=lora.embeddings_tensor.device))
-        else:
-            assert lora.embeddings_tensor is None
+    with pytest.raises(ValueError, match="Additional vocabulary support"):
+        LoRAModel.from_local_checkpoint(
+            sql_lora_files,
+            expected_lora_modules=list(expected_modules),
+            peft_helper=peft_helper,
+            device=device)
+
 
 
 def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
@@ -539,8 +517,7 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device,
                                                EMBEDDING_MODULES,
                                                EMBEDDING_PADDING_MODULES)
     worker_adapter_manager.vocab_size = (
-        dummy_model_gate_up.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size)
+        dummy_model_gate_up.unpadded_vocab_size)
     worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"

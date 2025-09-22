@@ -186,9 +186,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.hidden_size = model_config.get_hidden_size()
         self.vocab_size = model_config.get_vocab_size()
 
-        if self.lora_config is not None:
-            self.vocab_size += self.lora_config.lora_extra_vocab_size
-
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
@@ -1920,13 +1917,12 @@ def replace_set_lora(model):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
         bias: Optional[torch.Tensor] = None,
     ):
         # TODO: The integer index leads to a recompilation, but converting it
         # to a tensor doesn't seem to work anymore. This might be fixed with a
         # later release of torch_xla.
-        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
+        self._original_set_lora(index, lora_a, lora_b, bias)
         xm.mark_step()
 
     def _tpu_reset_lora(self, index: int):
