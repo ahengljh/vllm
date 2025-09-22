@@ -48,7 +48,6 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader, WeightsMapper, make_empty_intermediate_tensors_factory,
     make_layers, maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
