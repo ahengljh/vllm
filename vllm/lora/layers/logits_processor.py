@@ -105,6 +105,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        self.sharded_to_full_mapping_gpu: Optional[torch.Tensor]
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
                 self.sharded_to_full_mapping,
